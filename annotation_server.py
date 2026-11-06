@@ -17,6 +17,7 @@ import argparse
 import json
 import mimetypes
 import string
+import sys
 import threading
 import webbrowser
 import os
@@ -204,14 +205,16 @@ class Handler(BaseHTTPRequestHandler):
     def _api_list(self):
         img_dir, lbl_dir = get_dirs()
         files = []
-        for fn in sorted(os.listdir(img_dir)):
-            if fn.lower().endswith(IMAGE_EXTS) and os.path.isfile(os.path.join(img_dir, fn)):
-                files.append(fn)
+        if img_dir and os.path.isdir(img_dir):
+            for fn in sorted(os.listdir(img_dir)):
+                if fn.lower().endswith(IMAGE_EXTS) and os.path.isfile(os.path.join(img_dir, fn)):
+                    files.append(fn)
         classes = load_class_names()
         labeled = set()
-        for fn in os.listdir(lbl_dir):
-            if fn.endswith('.txt'):
-                labeled.add(os.path.splitext(fn)[0])
+        if lbl_dir and os.path.isdir(lbl_dir):
+            for fn in os.listdir(lbl_dir):
+                if fn.endswith('.txt'):
+                    labeled.add(os.path.splitext(fn)[0])
         self._send_json({
             'images': files,
             'classes': classes,
@@ -972,9 +975,16 @@ loadList();
 '''
 
 
+def _app_root():
+    """程序所在目录: 打包成 exe 后返回 exe 目录, 否则返回脚本目录"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def main():
     ap = argparse.ArgumentParser(description='YOLO 数据集可视化标注工具')
-    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), '生成数据', 'yolo_dataset', 'test')
+    base = os.path.join(_app_root(), '生成数据', 'yolo_dataset', 'test')
     ap.add_argument('--images', default=os.path.join(base, 'images'), help='图片文件夹')
     ap.add_argument('--labels', default=os.path.join(base, 'labels'), help='标签文件夹')
     ap.add_argument('--classes', default=os.path.join(os.path.dirname(base), '..', 'classes.txt'),
@@ -986,25 +996,43 @@ def main():
     CONFIG['images'] = os.path.abspath(args.images)
     CONFIG['labels'] = os.path.abspath(args.labels)
     CONFIG['classes'] = os.path.abspath(args.classes)
-    if not os.path.isdir(CONFIG['images']):
-        raise SystemExit(f'图片目录不存在: {CONFIG["images"]}')
-    os.makedirs(CONFIG['labels'], exist_ok=True)
+    if os.path.isdir(CONFIG['images']):
+        os.makedirs(CONFIG['labels'], exist_ok=True)
+    else:
+        # 打包成 exe 后在桌面双击运行时, 默认数据集通常不在身边:
+        # 不再直接退出, 改为以空数据集启动, 由页面顶部的文件夹选择器指定
+        print(f'提示: 默认图片目录不存在 -> {CONFIG["images"]}')
+        print('      已以空数据集启动, 请在页面顶部选择图片/标签文件夹后点"切换数据集"。')
+        CONFIG['images'] = ''
+        CONFIG['labels'] = ''
 
     mimetypes.add_type('image/webp', '.webp')
-    try:
-        server = Server(('127.0.0.1', args.port), Handler)
-    except OSError as e:
+    # 端口被占用时自动向后寻找空闲端口(最多尝试 50 个),
+    # 避免"8765 已被占用就打不开"——尤其桌面双击 exe 时已有一个实例在跑的情况
+    server = None
+    port = args.port
+    for i in range(50):
+        try:
+            server = Server(('127.0.0.1', port), Handler)
+            break
+        except OSError:
+            if i == 0:
+                print(f'端口 {port} 已被占用, 自动尝试下一个端口...')
+            port += 1
+    if server is None:
         raise SystemExit(
-            f'端口 {args.port} 已被占用(可能已有一个标注服务在运行)。\n'
-            f'  → 直接用浏览器访问 http://127.0.0.1:{args.port} 即可；\n'
-            f'  → 或先停掉旧进程：netstat -ano | findstr :{args.port}  然后 taskkill /F /PID <pid>\n'
-            f'  → 也可换一个端口：--port 8766\n原始错误: {e}')
+            f'端口 {args.port}~{port - 1} 均被占用, 无法启动。\n'
+            f'  → 可能已有多个标注服务在运行, 先停掉旧进程: '
+            f'netstat -ano | findstr :{args.port}  然后 taskkill /F /PID <pid>\n'
+            f'  → 或指定一个确定空闲的端口: --port 9000')
+    if port != args.port:
+        print(f'已自动改用空闲端口: {port}')
     print(f'图片目录: {CONFIG["images"]}')
     print(f'标签目录: {CONFIG["labels"]}')
     print(f'类别文件: {CONFIG["classes"] if os.path.isfile(CONFIG["classes"]) else "(未找到, 尝试 data.yaml)"}')
-    print(f'打开浏览器访问: http://127.0.0.1:{args.port}')
+    print(f'打开浏览器访问: http://127.0.0.1:{port}')
     if not args.no_open:
-        threading.Timer(0.8, lambda: webbrowser.open(f'http://127.0.0.1:{args.port}')).start()
+        threading.Timer(0.8, lambda p=port: webbrowser.open(f'http://127.0.0.1:{p}')).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
