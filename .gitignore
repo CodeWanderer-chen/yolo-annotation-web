@@ -1,0 +1,74 @@
+# ===== 密钥/凭证：绝对不能提交 =====
+*api_key*
+*apikey*
+*api-key*
+*.key
+*.pem
+secret*
+credential*
+.env
+.env.*
+token*
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+venv/
+env/
+.venv/
+.env/
+
+# ===== 虚拟环境 / 包管理 =====
+.conda/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ===== 测试与覆盖率 =====
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 数据集与产物：本仓库只放代码，不放数据 =====
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.webp
+*.gif
+*.zip
+*.tar
+*.tar.gz
+*.pt
+*.pth
+*.onnx
+*.weights
+images/
+labels/
+runs/
+datasets/
+生成数据/
+_tmp_*/
+_verify_*.py
+
+# 例外：保留文档中可能用到的示意图目录
+!docs/images/*.png
