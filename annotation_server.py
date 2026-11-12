@@ -19,6 +19,7 @@ import mimetypes
 import string
 import sys
 import threading
+import time
 import webbrowser
 import os
 import re
@@ -39,6 +40,11 @@ ACTIVE = {
     'labels': '',
     'classes': '',
 }
+
+# 客户端(浏览器标签页)心跳跟踪: 所有页面都关闭后自动退出服务
+CLIENTS = {}                        # clientId -> 最近一次心跳时间(epoch 秒)
+CLIENTS_LOCK = threading.Lock()
+EVER_CONNECTED = {'v': False}       # 是否曾有页面连接过(避免无人访问时立即退出)
 
 
 def get_dirs():
@@ -101,8 +107,9 @@ class Handler(BaseHTTPRequestHandler):
         return os.path.join(base, name)
 
     def log_message(self, fmt, *args):
-        # 精简日志
-        if '/api/' in (args[0] if args else ''):
+        # 精简日志: 只记录 /api/ 请求, 且忽略高频心跳 ping/bye
+        a0 = args[0] if args else ''
+        if '/api/' in a0 and '/api/ping' not in a0 and '/api/bye' not in a0:
             super().log_message(fmt, *args)
 
     # ---------- GET ----------
@@ -113,6 +120,15 @@ class Handler(BaseHTTPRequestHandler):
 
         if route == '/':
             self._send_bytes(PAGE_HTML.encode('utf-8'), 'text/html; charset=utf-8')
+            return
+
+        if route == '/api/ping':
+            cid = qs.get('id', [''])[0]
+            if cid:
+                with CLIENTS_LOCK:
+                    CLIENTS[cid] = time.time()
+                    EVER_CONNECTED['v'] = True
+            self._send_json({'ok': True})
             return
 
         if route == '/api/list':
@@ -174,24 +190,25 @@ class Handler(BaseHTTPRequestHandler):
         return drives or ['/']
 
     def _api_browse(self, path, kind='dir'):
-        """目录浏览: 列出子文件夹(kind=dir)或txt文件(kind=file); 路径为空时返回盘符列表"""
+        """目录浏览: 始终返回子文件夹(dirs); kind=file 时额外返回 txt 文件(files)。
+        路径为空时返回盘符列表。文件模式下也返回子文件夹, 以便继续向下钻取。"""
         if not path:
-            self._send_json({'path': '', 'dirs': self._list_drives(), 'is_root': True})
+            self._send_json({'path': '', 'dirs': self._list_drives(),
+                             'files': [], 'is_root': True})
             return
         path = os.path.abspath(path)
         if not os.path.isdir(path):
             self._send_json({'error': '目录不存在: ' + path}, 400)
             return
         try:
-            if kind == 'file':
-                entries = sorted(
-                    (e.name for e in os.scandir(path)
-                     if e.is_file() and e.name.lower().endswith('.txt')),
-                    key=str.lower)
-            else:
-                entries = sorted(
-                    (e.name for e in os.scandir(path) if e.is_dir()),
-                    key=str.lower)
+            subdirs, txts = [], []
+            for e in os.scandir(path):
+                if e.is_dir():
+                    subdirs.append(e.name)
+                elif kind == 'file' and e.is_file() and e.name.lower().endswith('.txt'):
+                    txts.append(e.name)
+            subdirs.sort(key=str.lower)
+            txts.sort(key=str.lower)
         except PermissionError:
             self._send_json({'error': '无权限访问: ' + path}, 403)
             return
@@ -199,7 +216,8 @@ class Handler(BaseHTTPRequestHandler):
         if parent == path:      # 已到根(盘符), 再上级返回盘符列表
             parent = ''
         self._send_json({'path': path, 'parent': parent,
-                         'dirs': [os.path.join(path, d) for d in entries],
+                         'dirs': [os.path.join(path, d) for d in subdirs],
+                         'files': [os.path.join(path, f) for f in txts],
                          'is_root': False})
 
     def _api_list(self):
@@ -225,6 +243,14 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- POST ----------
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == '/api/bye':
+            # 页面关闭时通过 sendBeacon 上报, 立即移除该客户端(心跳超时兑底见监控线程)
+            cid = urllib.parse.parse_qs(parsed.query).get('id', [''])[0]
+            if cid:
+                with CLIENTS_LOCK:
+                    CLIENTS.pop(cid, None)
+            self._send_json({'ok': True})
+            return
         if parsed.path == '/api/apply':
             self._api_apply()
             return
@@ -847,23 +873,29 @@ async function browseTo(path) {
   modalCur = d.path || ''; modalParent = d.parent || ''; modalSel = '';
   modalPath.value = modalCur || '(选择盘符)';
   modalList.innerHTML = '';
-  d.dirs.forEach(entry => {
+  const dirs = d.dirs || [], files = d.files || [];
+  // 子文件夹: 任何模式下都可点击进入(文件模式也能继续向下钻取)
+  dirs.forEach(entry => {
     const div = document.createElement('div');
     div.className = 'dir-entry';
-    div.textContent = entry;
-    if (browseFiles && !d.is_root) {
-      div.onclick = () => {   // 文件模式: 单击选中, 再点确认
-        modalList.querySelectorAll('.dir-entry').forEach(x => x.classList.remove('sel'));
-        div.classList.add('sel');
-        modalSel = entry;
-      };
-    } else {
-      div.onclick = () => browseTo(entry);
-    }
+    div.textContent = '📁 ' + entry;
+    div.onclick = () => browseTo(entry);
     modalList.appendChild(div);
   });
-  if (!d.dirs.length) {
-    modalList.innerHTML = '<div class="dir-entry" style="color:#777">' + (browseFiles && !d.is_root ? '(无 txt 文件)' : '(无子文件夹)') + '</div>';
+  // txt 文件: 仅文件模式, 单击选中后点"确定"
+  files.forEach(entry => {
+    const div = document.createElement('div');
+    div.className = 'dir-entry file-entry';
+    div.textContent = '📄 ' + entry;
+    div.onclick = () => {
+      modalList.querySelectorAll('.file-entry').forEach(x => x.classList.remove('sel'));
+      div.classList.add('sel');
+      modalSel = entry;
+    };
+    modalList.appendChild(div);
+  });
+  if (!dirs.length && !files.length) {
+    modalList.innerHTML = '<div class="dir-entry" style="color:#777">' + (browseFiles && !d.is_root ? '(无子文件夹, 无 txt 文件)' : '(无子文件夹)') + '</div>';
   }
 }
 document.getElementById('btnBrowseImg').onclick = () => openBrowser(imgDirInput);
@@ -954,8 +986,21 @@ document.querySelectorAll('#toolbar button, #folderBar button, #btnSidebar').for
   b.addEventListener('click', () => setTimeout(() => b.blur(), 0));
 });
 window.addEventListener('resize', () => { if (img.src) initView(); });
+// 每个标签页一个 clientId(存 sessionStorage, 刷新时保持不变, 避免刷新被误判为关闭)
+let clientId = sessionStorage.getItem('annoClientId');
+if (!clientId) {
+  clientId = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  sessionStorage.setItem('annoClientId', clientId);
+}
+// 心跳: 让服务端知道本页面仍开着; 所有页面都关闭后服务端会自动退出
+function ping() { fetch('/api/ping?id=' + encodeURIComponent(clientId), {cache: 'no-store'}).catch(() => {}); }
+ping();
+setInterval(ping, 1500);
+
 window.addEventListener('beforeunload', e => {
   clearTimeout(autoSaveTimer);
+  // 通知服务端本页面已关闭(刷新时下一次心跳会立刻重新登记, 不会误退出)
+  try { navigator.sendBeacon('/api/bye?id=' + encodeURIComponent(clientId)); } catch (err) {}
   // 自动保存模式: 关页/刷新前用 beacon 同步刷盘, 不再弹拦截提示
   if (chkAutoSave.checked && curIdx >= 0 && dirtySet.has(images[curIdx])) {
     try {
@@ -980,6 +1025,33 @@ def _app_root():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def _client_monitor(srv, hb_timeout=7.0, grace=3.0, interval=0.5):
+    """后台监控: 当曾经有页面连接过、且所有页面都已关闭(心跳超时或已 bye)
+    并持续 grace 秒后, 自动关闭服务, 让终端 / exe 进程退出。"""
+    empty_since = None
+    while True:
+        time.sleep(interval)
+        now = time.time()
+        with CLIENTS_LOCK:
+            for cid in list(CLIENTS):
+                if now - CLIENTS[cid] > hb_timeout:
+                    del CLIENTS[cid]
+            alive = len(CLIENTS)
+            ever = EVER_CONNECTED['v']
+        if not ever:
+            empty_since = None
+            continue
+        if alive == 0:
+            if empty_since is None:
+                empty_since = now
+            elif now - empty_since >= grace:
+                print('\n所有标注网页已关闭, 服务自动退出。')
+                srv.shutdown()
+                return
+        else:
+            empty_since = None
 
 
 def main():
@@ -1033,6 +1105,9 @@ def main():
     print(f'打开浏览器访问: http://127.0.0.1:{port}')
     if not args.no_open:
         threading.Timer(0.8, lambda p=port: webbrowser.open(f'http://127.0.0.1:{p}')).start()
+    # 启动客户端监控线程: 当所有标注网页都关闭后, 自动退出服务(无需手动 Ctrl+C)
+    threading.Thread(target=_client_monitor, args=(server,), daemon=True).start()
+    print('提示: 关闭所有标注网页后, 本窗口会自动退出。')
     try:
         server.serve_forever()
     except KeyboardInterrupt:
