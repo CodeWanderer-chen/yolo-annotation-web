@@ -458,7 +458,7 @@ PAGE_HTML = r'''<!DOCTYPE html>
   </div>
 </div>
 <script>
-const COLORS = ['#4caf50','#e91e63','#2196f3','#ff9800','#9c27b0','#00bcd4','#f44336','#8bc34a','#ffc107','#607d8b'];
+// 类别颜色改为按黄金角程序化生成(见 colorOf), 不再使用固定调色板, 避免类别数超过调色板长度时撞色
 let images = [], classes = [], labeledSet = new Set(), dirtySet = new Set();
 let curIdx = -1, boxes = [], selected = -1;
 let undoStack = [], redoStack = [];
@@ -473,7 +473,14 @@ const drawBoxEl = document.getElementById('drawBox');
 const zoomLabel = document.getElementById('zoomLabel');
 const chkLabels = document.getElementById('chkLabels'), chkAutoSave = document.getElementById('chkAutoSave');
 
-function colorOf(cls) { return COLORS[cls % COLORS.length]; }
+function colorOf(cls) {
+  // 用黄金角(≈137.508°)在色相环上均匀取色, 并按类别微调饱和度/明度,
+  // 保证任意数量的类别颜色都尽量互不相同(旧写法 cls % 调色板长度 会让 0 与 10 撞成同色)。
+  const h = (cls * 137.508) % 360;
+  const s = 68 + (cls % 3) * 12;                 // 68 / 80 / 92
+  const l = 46 + (Math.floor(cls / 3) % 3) * 9;  // 46 / 55 / 64
+  return 'hsl(' + h.toFixed(1) + ',' + s + '%,' + l + '%)';
+}
 function nameOf(cls) { return classes[cls] !== undefined ? classes[cls] : ('class_' + cls); }
 function setStatus(msg, dirty) {
   statusEl.textContent = msg;
